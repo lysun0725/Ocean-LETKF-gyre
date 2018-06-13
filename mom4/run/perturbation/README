@@ -1,0 +1,23 @@
+README (perturbation)
+
+1. setup_ini_perturbation.f90: Here the user needs to change the perturabation rule and perturbation file. e.g. tau.nc
+
+2. sh make_ini_perturbation.sh: generate *.x file
+
+3. setup_ens_perturbation.sh: change ENS_NUM
+
+4. pre_run_ens.sh: setup initial conditions for different ensembles with different wind force.
+
+5. compute_perturbation.sh: output the perbation profile
+
+
+README(drifters perturbation)
+
+This process is after pre_run_ens.sh
+
+1. setup_ini_drift_perturbation.f90: if you want to change the dimensions of drifters, for example, adding temp, salinity to drifters, then modify this code. Or, modify this file when change the standard deviation of the random noise
+
+2. sh make_ini_perturbation.sh: if change nbv, you need to compile again.
+
+3. setup_ens_drift_perturbation.sh: this code is attached to run_cycle.sh no need to modify.
+
