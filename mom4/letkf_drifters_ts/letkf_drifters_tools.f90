@@ -1,0 +1,1020 @@
+MODULE letkf_drifters_tools
+! Original Author: Prof. Stephen G. Penny
+!                  Department of Atmospheric and Oceanic Science
+!                  University of Maryland College Park
+! Edits:
+!        06/29/2015: moved code to UMD DT2 (STEVE), compiled successfully
+!        07/02/2015: moved code back to Gaea to synch with GitHub repository
+!
+! Additional Edits:
+!
+!
+!
+! Function:
+! Normally, when analyzing the model grid, the gridpoints themselves are the
+! model space while the data values are the temperature, salinity, u and v
+! velocities, etc. For the drifters, it is the drifter_ids that are the model
+! space, and the data values are the positions themselves, as specified by the
+! x, y and z-coordinates.
+!
+!
+USE netcdf
+USE common
+USE common_mpi  
+USE common_letkf    !nbv := number of ensemble members
+USE params_letkf
+USE params_model
+USE params_obs
+USE params_drift_extra
+
+
+!STEVE: for (DRIFTERS)
+REAL(r_size), ALLOCATABLE, DIMENSION(:,:,:,:), SAVE :: v4d          !(DRIFTERS) num_drifters x num_times x nbv x nv4d 
+                                                                    !(DRIFTERS) value stored is coordinate
+REAL(r_size), ALLOCATABLE, DIMENSION(:), SAVE :: drifter_idx        !(DRIFTERS) dim=nid1, this is read in and stored during scatter
+REAL(r_size), ALLOCATABLE, DIMENSION(:), SAVE :: drifter_ids        !(DRIFTERS) dim=num_drifters, this is read in from model output
+REAL(r_size), ALLOCATABLE, DIMENSION(:), SAVE :: drifter_times      !(DRIFTERS) dim=num_drifters, read in from model output
+REAL(r_size), ALLOCATABLE, DIMENSION(:), SAVE :: drifter_ti         !(DRIFTERS) dim=num_drifters, time index (REAL)
+INTEGER, SAVE :: num_drifters !read in from model output, updated by observation input, used to dimension prev. arrays
+INTEGER, SAVE :: num_times    !read in from model output, updated by observation input, used to dimension prev. arrays
+!LOGICAL, PARAMETER :: DO_DRIFTERS = .false. !STEVE: this is in common_mom4.f90
+
+! Inflation parameter for (DRIFTERS)
+!REAL(r_size),PARAMETER :: cov_infl_mul = 1.01d0 !-1.01d0 !multiplicative inflation
+
+! For parallel mpi operations:
+INTEGER,SAVE :: nid1                             !STEVE: this is the number of gridpoints to run on this (myrank) processor
+INTEGER,SAVE :: nid1max                          !STEVE: the largest number of gridpoints on any 1 processor
+INTEGER,ALLOCATABLE,SAVE :: nid1node(:)
+
+CONTAINS
+
+SUBROUTINE get_nobs_drifters(cfile,nrec,nn)
+!===============================================================================
+! Read in observation file to count the number of observations
+!===============================================================================
+  IMPLICIT NONE
+  CHARACTER(*),INTENT(IN) :: cfile
+  INTEGER,INTENT(IN) :: nrec
+  INTEGER,INTENT(OUT) :: nn
+  REAL(r_sngl),ALLOCATABLE :: wk(:) 
+  INTEGER :: ios
+  INTEGER :: it,is,ix,iy,iz !(OCEAN)
+  INTEGER :: iunit
+  LOGICAL :: ex
+  LOGICAL :: dodebug=.false.
+
+  ALLOCATE(wk(nrec))
+  nn = 0
+  it = 0
+  is = 0    !(OCEAN)
+  ix = 0    !(OCEAN)
+  iy = 0    !(OCEAN)
+  iz = 0    !(OCEAN)
+  iunit=91
+  if (dodebug) print *, "get_nobs::"
+  INQUIRE(FILE=cfile,EXIST=ex)
+  IF(ex) THEN
+    OPEN(iunit,FILE=cfile,FORM='unformatted',ACCESS='sequential')
+    DO
+      READ(iunit,IOSTAT=ios) wk
+      if (dodebug .and. nrec.eq.6) then
+        PRINT '(I6,2F7.2,F10.2,2F12.2)',NINT(wk(1)),wk(2),wk(3),wk(4),wk(5),wk(6)
+      elseif (dodebug .and. nrec .eq. 7) then
+        PRINT '(I6,2F7.2,F10.2,2F12.2)',NINT(wk(1)),wk(2),wk(3),wk(4),wk(5),wk(6),wk(7)
+      elseif (dodebug .and. nrec .eq. 8) then
+        PRINT '(I6,2F7.2,F10.2,4F12.2)',NINT(wk(1)),wk(2),wk(3),wk(4),wk(5),wk(6),wk(7),wk(8)
+      elseif (dodebug .and. nrec .eq. 9) then
+        PRINT '(I6,2F7.2,F10.2,5F12.2)',NINT(wk(1)),wk(2),wk(3),wk(4),wk(5),wk(6),wk(7),wk(8),wk(9)
+      elseif (dodebug .and. nrec .eq. 10) then
+        PRINT '(I6,2F7.2,F10.2,6F12.2)',NINT(wk(1)),wk(2),wk(3),wk(4),wk(5),wk(6),wk(7),wk(8),wk(9),wk(10)
+      endif
+      IF(ios /= 0) EXIT
+      SELECT CASE(NINT(wk(1)))
+      CASE(id_x_obs)     !(OCEAN)
+        ix = ix + 1      !(OCEAN)
+      CASE(id_y_obs)     !(OCEAN)
+        iy = iy + 1      !(OCEAN)
+      CASE(id_z_obs)     !(OCEAN)
+        iz = iz + 1      !(OCEAN)
+      CASE(id_t_dobs)
+        it = it + 1
+      CASE(id_s_dobs)
+        is = is + 1
+      END SELECT
+      nn = nn + 1
+    END DO
+    WRITE(6,'(I10,A)') nn,' OBSERVATIONS INPUT (in get_nobs)'
+    WRITE(6,'(A12,I10)') '       DR_T:',it
+    WRITE(6,'(A12,I10)') '       DR_S:',is   !(OCEAN)
+    WRITE(6,'(A12,I10)') '          X:',ix   !(OCEAN)
+    WRITE(6,'(A12,I10)') '          Y:',iy   !(OCEAN)
+    WRITE(6,'(A12,I10)') '          Z:',iz   !(OCEAN)
+    CLOSE(iunit)
+  ELSE
+    WRITE(6,'(2A)') cfile,' does not exist -- skipped'
+  END IF
+  DEALLOCATE(wk)
+
+  RETURN
+END SUBROUTINE get_nobs_drifters
+
+! The first routine called by letkf.f90:
+SUBROUTINE set_common_drifters
+  IMPLICIT NONE
+  INTEGER :: i,j,n !,ibv 
+  CHARACTER(slen) :: drifile="grd"
+
+  WRITE(6,'(A)') 'Hello from set_common_drifters'
+
+  !alternative: read this from a file
+  CALL read_dimension(drifile,num_drifters,num_times)
+
+  !ndr0=num_drifters*num_times
+
+  ! Next, split up the drifters to the different processors:
+  i = MOD(num_drifters,nprocs)
+  nid1max = (num_drifters - i)/nprocs + 1
+  WRITE(6,*) "nid1max = ", nid1max
+  IF(myrank < i) THEN
+    nid1 = nid1max
+  ELSE
+    nid1 = nid1max - 1
+  END IF
+  WRITE(6,'(A,I3.3,A,I6)') 'MYRANK ',myrank,' number of drifter ids: nid1=',nid1
+  ALLOCATE(nid1node(nprocs))
+  DO n=1,nprocs
+    IF(n-1 < i) THEN
+      nid1node(n) = nid1max
+    ELSE
+      nid1node(n) = nid1max - 1
+    END IF
+  END DO
+  WRITE(6,*) "nid1node...."
+  WRITE(6,*) nid1node
+
+  ! For this processor, allocate enough space for its assigned drifters
+  !ALLOCATE(v4d(nid1max,num_times,nbv,nv4d))
+
+  ! Read the ensemble of drifter files into this data structure
+  !CALL read_ens_drifters('gs01',v4d) ! modify later.....
+  RETURN
+
+END SUBROUTINE set_common_drifters
+
+SUBROUTINE read_obs2_drifters(cfile,nn,elem,rlon,rlat,rlev,obid,oerr,otime,oval)
+  IMPLICIT NONE
+  CHARACTER(*),INTENT(IN) :: cfile
+  INTEGER,INTENT(IN) :: nn  ! LUYU: number of drifters
+  REAL(r_size),INTENT(OUT) :: rlon(nn)
+  REAL(r_size),INTENT(OUT) :: rlat(nn)
+  REAL(r_size),INTENT(OUT) :: rlev(nn)
+  REAL(r_size),INTENT(OUT) :: oerr(nn)
+  REAL(r_size),INTENT(OUT) :: otime(nn)
+  REAL(r_size),INTENT(OUT) :: elem(nn) ! element number: id_x_obs, id_y_obs, id_z_obs
+  INTEGER,INTENT(OUT) :: obid(nn)
+  INTEGER :: dodebug = 0
+  REAL(r_sngl),INTENT(OUT) :: oval(nn)
+  REAL(r_sngl),ALLOCATABLE :: wk(:)
+  INTEGER :: n,iunit
+
+  ALLOCATE(wk(8))
+
+  WRITE(6,'(A)') 'Hello from read_obs2_drifters'
+  !print *, 'nid_dobs = ', nid_dobs, 'nv4d = ', nv4d
+ 
+  iunit=91
+  OPEN(iunit,FILE=cfile,FORM='unformatted',ACCESS='sequential') 
+  DO n=1,nn
+    READ(iunit) wk
+    elem(n) = INT(wk(1),r_size)
+    rlon(n) = REAL(wk(2),r_size)
+    rlat(n) = REAL(wk(3),r_size)
+    rlev(n) = REAL(wk(4),r_size)
+    obid(n) = INT(wk(5),r_size)
+    oerr(n) = REAL(wk(6),r_size)
+    otime(n) = REAL(wk(7),r_size)
+    oval(n) = REAL(wk(8),r_sngl) 
+  END DO
+  CLOSE(iunit)
+
+  RETURN
+END SUBROUTINE read_obs2_drifters
+
+SUBROUTINE write_obs2_drifters(cfile,nn,elem,rlon,rlat,rlev,obid,oerr,ohx,oqc,otime,oval)
+  IMPLICIT NONE
+  CHARACTER(*),INTENT(IN) :: cfile
+  INTEGER,INTENT(IN) :: nn
+  REAL(r_size),INTENT(IN) :: elem(nn) ! element number
+  REAL(r_size),INTENT(IN) :: rlon(nn)
+  REAL(r_size),INTENT(IN) :: rlat(nn)
+  REAL(r_size),INTENT(IN) :: rlev(nn)
+  REAL(r_size),INTENT(IN) :: oerr(nn)
+  REAL(r_size),INTENT(IN) :: ohx(nn)
+  REAL(r_sngl),INTENT(IN) :: oval(nn)
+  INTEGER,INTENT(IN) :: obid(nn)
+  INTEGER,INTENT(IN) :: oqc(nn)
+  REAL(r_size),INTENT(IN) :: otime(nn)
+  REAL(r_sngl) :: wk(10)
+  INTEGER :: n,iunit
+  LOGICAL :: dodebug=.false.
+
+  iunit=92
+  OPEN(iunit,FILE=cfile,FORM='unformatted',ACCESS='sequential')
+  DO n=1,nn
+    wk(1) = REAL(elem(n),r_sngl)  ! Type of observation x,y,z
+    wk(2) = REAL(rlon(n),r_sngl)  ! Ob lon
+    wk(3) = REAL(rlat(n),r_sngl)  ! Ob lat
+    wk(4) = REAL(rlev(n),r_sngl)  ! Ob level
+    wk(5) = INT(obid(n))  ! ID for the drifters
+    wk(6) = REAL(oerr(n),r_sngl)  ! Estimated observation error
+    wk(7) = REAL(ohx(n),r_sngl)   ! Model forecast transformed to observation space: H(xb)
+    wk(8) = INT(oqc(n))   ! Quality control ID (1==keep, 0==discard) for use in assimilation
+    wk(9) = REAL(otime(n),r_sngl)  ! Ob time
+    wk(10) = REAL(oval(n),r_sngl)  ! Ob val
+    !if (dodebug) PRINT '(I6,2F16.6,F10.2,F12.2,F16.6,3F12.2,F16.6)',NINT(wk(1)),wk(2),wk(3),wk(4),wk(5),wk(6),wk(7),wk(8),wk(9),wk(10)
+    WRITE(iunit) wk
+    !print *, wk
+  END DO
+  CLOSE(iunit)
+
+  RETURN
+
+END SUBROUTINE write_obs2_drifters
+
+! The second routine called by letkf.f90:
+
+
+!-----------------------------------------------------------------------
+! Transformation from model (drifter_id) space to observation space (i.e. H-operator)
+!-----------------------------------------------------------------------
+SUBROUTINE Trans_DtoY(elm,ri,rj,rk,v4d_in,yobs)        !(OCEAN)
+  USE common_obs_mom4
+  IMPLICIT NONE
+  REAL(r_size),INTENT(IN) :: elm
+  REAL(r_size),INTENT(IN) :: ri,rj,rk
+  REAL(r_sngl),INTENT(IN) :: v4d_in(num_drifters,num_times,nv4d)
+  REAL(r_size),INTENT(OUT) :: yobs  
+  INTEGER :: i,j,k
+  INTEGER :: intelm
+  INTEGER :: ddodebug=0
+
+  if (ddodebug) print *, 'Hello from Trans_DtoY'
+
+  intelm = NINT(elm)
+  SELECT CASE (intelm)
+  CASE(id_x_obs)   ! (OCEAN) (DRIFTERS)
+    !STEVE: interpolate the time-based drifter information to the observation time.
+    i = NINT(ri)
+    k = iv4d_x
+    CALL itpl_4d(v4d_in(i,:,k),rj,yobs) !STEVE: here, rj == rt (REAL time index), rk == x,y, or z (1,2,3), and ri == drifter_id
+    if (ddodebug) print *, 'v4d_(i,:,k)=', v4d_in(i,:,k)
+  CASE(id_y_obs)   ! (OCEAN) (DRIFTERS)
+    i = NINT(ri)
+    k = iv4d_y
+    CALL itpl_4d(v4d_in(i,:,k),rj,yobs)
+  CASE(id_z_obs)   ! (OCEAN) (DRIFTERS)
+    i = NINT(ri)
+    k = iv4d_z
+    CALL itpl_4d(v4d_in(i,:,k),rj,yobs)
+  CASE(id_t_dobs)  ! (OCEAN) (DRIFTERS)
+    i = NINT(ri)
+
+    IF (nv4d > 3) THEN ! If the drifter module contains the value of temp and salt
+      k = iv4d_t
+      CALL itpl_4d(v4d_in(i,:,k),rj,yobs)
+    ELSE 
+      ! Otherwise, convert this to the ocean fluid obervation (Later)
+      print *, "Given model does not have temp and salt with drifter module. Interpolate from model grid and call itpl_3d (UNDER DEVELOPMENT)"
+    END IF
+  CASE(id_s_dobs)
+    i = NINT(ri)
+    IF (nv4d > 3) THEN
+      k = iv4d_s
+      CALL itpl_4d(v4d_in(i,:,k),rj,yobs)
+    ELSE
+      ! Otherwise, convert this to the ocean fluid obervation (Later)
+      print *, "Given model does not have temp and salt with drifter module. Interpolate from model grid and call itpl_3d (UNDER DEVELOPMENT)"
+    END IF 
+  CASE DEFAULT
+    print *, "ERROR::Trans_DtoY:: observation type not recognized."
+    print *, "element id = ", intelm
+    print *, "available id's = ", id_x_obs, id_y_obs, id_z_obs
+    print *, "STEVE: STOPPING ON PURPOSE..."
+    STOP 1
+  END SELECT
+
+  RETURN
+END SUBROUTINE Trans_DtoY
+
+SUBROUTINE drift2ijk(elem,oid,otime,rlon,rlat,rlev,ri,rj,rk)     !(OCEAN)
+  IMPLICIT NONE
+  REAL(r_size),INTENT(IN) :: elem
+  INTEGER     ,INTENT(IN) :: oid
+  REAL(r_size),INTENT(IN) :: otime 
+  REAL(r_size),INTENT(IN) :: rlon
+  REAL(r_size),INTENT(IN) :: rlat
+  REAL(r_size),INTENT(IN) :: rlev ! depth
+  REAL(r_size),INTENT(OUT) :: ri  ! drifter id index
+  REAL(r_size),INTENT(OUT) :: rj  ! time index
+  REAL(r_size),INTENT(OUT) :: rk  ! var index (x,y,z)
+  REAL(r_size) :: aj
+  INTEGER :: i,j,k
+  LOGICAL :: dodebug = .false.
+
+  !(DRIFTERS) num_times x nv4d x num_drifters
+  ! If this is a drifter observation, then what we need is a time interpolation:
+  if (elem .eq. id_x_obs) then    
+    rk = 1                          ! iv4d_x, field index for x
+  elseif (elem .eq. id_y_obs) then  
+    rk = 2                          ! iv4d_y, field index for y
+  elseif (elem .eq. id_z_obs) then  
+    rk = 3                          ! iv4d_z, field index for z
+  elseif (elem .eq. id_t_dobs) then
+    rk = 4
+  elseif (elem .eq. id_s_dobs) then
+    rk = 5
+  else
+    WRITE(6,*) "This observation is not a drifter! Stopping..."
+    STOP(3)
+  endif
+
+  ! Identify drifter and time indices:
+  ! Loop through drifter id's until we find the right drifter:
+  do k=1,num_drifters
+    if (NINT(drifter_ids(k)) .eq. oid) exit
+    ! drifter_ids is an array of ids corrresponding the the ids in the
+    ! observations. This must be input via the model input file, and the
+    ! drifter ids in the model must match the observation ids.
+  enddo
+  ri = k
+
+  ! Loop through time indexes until we find the right time index and then get
+  ! the fractional time index:
+  do j=1,num_times
+    if (drifter_times(j) > otime) exit
+  enddo
+  !STEVE: now apply the interpolation at the identified drifter id
+  aj = (otime - drifter_times(j-1)) / (drifter_times(j) - drifter_times(j-1))
+  rj = REAL(j-1,r_size) + aj
+
+  return
+END SUBROUTINE drift2ijk
+
+!STEVE: for assimilating (DRIFTERS)
+! NOTE: input data for one drifter id, at all times
+SUBROUTINE itpl_4d(var,rt,var5)
+  IMPLICIT NONE
+  REAL(r_sngl),INTENT(IN) :: var(:) ! dim = num_times
+! REAL(r_size),INTENT(IN) :: var(:,:) ! num_times,3 = (nlon,nlat,nlev)
+  REAL(r_size),INTENT(IN) :: rt ! model time matched to observation timestamp
+  REAL(r_size),INTENT(OUT) :: var5
+! REAL(r_size),DIMENSION(3),INTENT(OUT) :: var5
+  REAL(r_size) :: an
+  INTEGER :: n
+
+  ! time index: 
+  n = CEILING(rt) 
+  an = rt - REAL(n-1,r_size)
+
+  ! Linearly interpolate drifter position information between two drifter times
+  var5 = (1-an) * var(n-1) + (an) * var(n) ! x, y, or z-coordinate, depending on which is input
+  
+  RETURN
+END SUBROUTINE itpl_4d
+
+SUBROUTINE read_ens_drifters(file,v4d_sub)
+  IMPLICIT NONE
+  CHARACTER(4),INTENT(IN) :: file !(gues)
+  REAL(r_size),INTENT(OUT) :: v4d_sub(nid1,num_times,nbv,nv4d)
+  REAL(r_sngl) :: v4d_all(num_drifters,num_times,nv4d)
+  INTEGER :: l,n,ll,im,imm
+  CHARACTER(11) :: filename='file000'
+  !STEVE: debug
+  LOGICAL :: dodebug = .true.
+
+  !STEVE: for my purposes, nbv << nprocs, so ll==1 and this loop just reads the
+  !drifters for one ensemble member. Then it must distribute to all procs.
+  ll = CEILING(REAL(nbv)/REAL(nprocs))
+  DO l=1,ll
+    im = myrank+1 + (l-1)*nprocs  
+    IF(im <= nbv) THEN
+      WRITE(filename(1:7),'(A4,I3.3)') file,im
+      WRITE(6,'(A,I3.3,2A)') 'In common_mpi_mom4.f90::read_ens_drifters, MYRANK',myrank,' is reading a file ',filename, 'nprocs=', nprocs
+      CALL read_drifters(filename,v4d_all)
+    END IF
+
+    DO n=0,nprocs-1
+      im = n+1 + (l-1)*nprocs
+      IF(im <= nbv) THEN
+        WRITE(6,*) "In common_mpi_mom4.f90::read_ens_drifters, calling scatter_drifters_mpi..."
+        CALL scatter_drifters_mpi(n,v4d_all,v4d_sub(:,:,im,:))
+        WRITE(6,*) "In common_mpi_mom4.f90::read_ens_drifters, finished calling scatter_drifters_mpi."
+      END IF
+    END DO
+  END DO
+
+  RETURN
+
+END SUBROUTINE read_ens_drifters
+
+SUBROUTINE scatter_drifters_mpi(nrank,v4d_all,v4d_sub)
+  INTEGER,INTENT(IN) :: nrank
+  REAL(r_sngl),INTENT(IN)  :: v4d_all(num_drifters,num_times,nv4d)
+  REAL(r_size),INTENT(OUT) :: v4d_sub(nid1,num_times,nv4d)
+  REAL(r_sngl) :: bufs(nid1max,num_times*nv4d,nprocs)
+  REAL(r_sngl) :: bufr(nid1max,num_times*nv4d)
+  INTEGER :: i,j,k,n,ierr,ns,nr
+  INTEGER :: iter,niter
+
+  ns = nid1max * (num_times * nv4d)
+  nr = ns
+  IF(myrank == nrank) THEN
+    j=0
+    DO n=1,nv4d
+      DO k=1,num_times
+        j = j+1
+        CALL drft_to_buf(v4d_all(:,k,n),bufs(:,j,:))
+      END DO
+    END DO
+  END IF
+
+  CALL MPI_BARRIER(MPI_COMM_WORLD,ierr)
+  CALL MPI_SCATTER(bufs,ns,MPI_REAL,&
+                 & bufr,nr,MPI_REAL,nrank,MPI_COMM_WORLD,ierr)
+  j=0
+  DO n=1,nv4d
+    DO k=1,num_times
+      j = j+1
+      v4d_sub(:,k,n) = REAL(bufr(1:nid1,j),r_size)
+    END DO
+  END DO
+
+  CALL MPI_BARRIER(MPI_COMM_WORLD,ierr)
+
+  RETURN
+
+END SUBROUTINE scatter_drifters_mpi
+
+!-----------------------------------------------------------------------
+! drifter id data -> buffer
+!-----------------------------------------------------------------------
+SUBROUTINE drft_to_buf(drft,buf)
+  REAL(r_sngl),INTENT(IN) :: drft(num_drifters)
+  REAL(r_sngl),INTENT(OUT) :: buf(nid1max,nprocs)
+  INTEGER :: i,j,m,nid
+
+  DO m=1,nprocs
+    DO i=1,nid1node(m)
+      j = m-1 + nprocs * (i-1)
+      nid = MOD(j,num_drifters) + 1
+      buf(i,m) = drft(nid)
+    END DO
+  END DO
+
+  RETURN
+END SUBROUTINE drft_to_buf
+
+SUBROUTINE read_dimension(infile,num_drifters,num_times)
+  IMPLICIT NONE
+  CHARACTER(*),INTENT(IN) :: infile
+  INTEGER, INTENT(OUT) :: num_drifters,num_times
+  CHARACTER(16) :: dummy_char
+  CHARACTER(8*12) :: header_line
+  INTEGER :: fid = 33
+  CHARACTER(slen) :: drfile
+ 
+  print *, 'Hello from read_dimension.'
+  drfile = trim(infile)//'.drifters_inp.txt' ! (DRIFTERS)
+
+  ! Open the DRIFTERS file postprocessed from mom4p1 netcdf output files
+  open(fid,FILE=drfile,ACCESS='sequential')
+  read(fid,'(A16,I8,A16,I8)')  dummy_char, num_drifters, dummy_char, num_times
+  print *, 'num_drifters=', num_drifters, 'num_times=', num_times
+  close(fid)
+
+  ALLOCATE(drifter_ids(num_drifters))
+  ALLOCATE(drifter_times(num_times))
+
+  RETURN
+END SUBROUTINE read_dimension
+
+SUBROUTINE read_drifters(infile,v4d_all)
+  IMPLICIT NONE
+  CHARACTER(*),INTENT(IN) :: infile 
+  REAL(r_sngl),INTENT(OUT) :: v4d_all(num_drifters,num_times,nv4d)
+  REAL :: dlon, dlat, ddepth, dtemp, dsalt, dtime
+  INTEGER :: ditime, dids
+  CHARACTER(16) :: dummy_char
+  CHARACTER(8*16) :: header_line
+  INTEGER :: di, ti
+  INTEGER :: fid = 33, dodebug = 1, ios=0
+  CHARACTER(24) :: drfile
+
+  drfile = trim(infile)//'.drifters_inp.txt' ! (DRIFTERS)
+
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  ! Open the XYZ drifters positions file
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  WRITE(6,*), 'Hello from read_drifters.'
+
+  ! Open the DRIFTERS file postprocessed from mom4p1 netcdf output files
+  open(fid,FILE=drfile,ACCESS='sequential')
+  read(fid,'(A16,I8,A16,I8)')  dummy_char, num_drifters, dummy_char, num_times
+  read(fid,*) header_line
+  
+  WRITE(6,*) num_drifters, num_times
+  ! Read all positions (and possibly temp and salt)  of each drifter:
+  DO di=1,num_drifters
+    DO ti=1,num_times
+      read(fid,'(I16,4F16.6,E16.4,F16.6,I16)',IOSTAT=ios) dids, dlon, dlat, ddepth, dtemp, dsalt, dtime, ditime
+      IF (ios==0) THEN
+        IF (dodebug .eq. 1) THEN
+          WRITE(6,*), dids, dlon, dlat, ddepth, dtemp, dsalt, dtime, ditime
+        END IF
+        drifter_ids(di) = dids
+        IF (di .eq. 1) drifter_times(ti) = dtime  !
+        v4d_all(di,ti,1) = dlon
+        v4d_all(di,ti,2) = dlat
+        v4d_all(di,ti,3) = ddepth
+        IF (nv4d .ge. 5) THEN
+          ! If we have temperature and salinity observations at each position,
+          ! we can assimilate this data too
+          v4d_all(di,ti,4) = dtemp
+          v4d_all(di,ti,5) = dsalt
+        END IF
+      ELSE
+        EXIT 
+      END IF
+    END DO
+    IF (ios /= 0) EXIT
+  END DO
+  IF (dodebug .eq. 1) THEN
+    WRITE(6,*)"drifter_times=",drifter_times
+  END IF
+  close(fid)
+
+END SUBROUTINE read_drifters
+
+SUBROUTINE write_drifters(file,v4d_all)
+  USE netcdf
+  IMPLICIT NONE
+! (DRIFTERS)
+  CHARACTER(*),INTENT(IN) :: file
+  REAL(r_sngl), INTENT(IN) :: v4d_all(num_drifters,num_times,nv4d)
+  INTEGER :: nd, np
+  INTEGER :: nd_dimid, np_dimid, dimids(2)
+  INTEGER :: pos_varid, ids_varid
+  REAL, DIMENSION(:,:), ALLOCATABLE :: positions
+  INTEGER, DIMENSION(:), ALLOCATABLE :: ids
+  CHARACTER(24) :: drfile
+  INTEGER :: ncid
+
+  drfile = trim(file)//'.drifters_inp.nc' ! (DRIFTERS)
+
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  ! Write the XYZ drifters positions file
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  ! Write drifter positions in input file readable by mom4p1
+
+  !Collect positions and times of drifters
+  if (.false.) then ! FOR TESTING
+    print *, "letkf_drifters.f90::write_drifters:: WARNING! OUTPUTTING only TEST SAMPLE DATA."
+    nd = 3
+    np = 5
+    ALLOCATE(positions(nd,np),ids(np))
+    positions = RESHAPE((/200, 10, 1000, &
+                200,  0, 1000, &
+                200,-10, 1000, &
+                180,  5, 1000/), (/nd,np/) )
+    ids = (/12, 23, 34, 45/)
+  else
+    nd = 3 !nv4d
+    np = num_drifters
+    ALLOCATE(positions(nd,np),ids(np))
+    !WRITE(6,*) "#### BEFORE####"
+    !WRITE(6,*) v4d_all(1:np,num_times,1:nd)
+    positions = RESHAPE(TRANSPOSE(v4d_all(1:np,num_times,1:nd)),(/nd,np/)) 
+    !WRITE(6,*) "#### AFTER####"
+    !WRITE(6,*) positions
+    ids = drifter_ids
+  endif
+
+  ! Create the netCDF file. The nf90_clobber parameter tells netCDF to
+  ! overwrite this file, if it already exists.
+  call check( nf90_create(drfile, NF90_CLOBBER, ncid) )
+
+  ! Define the dimensions. NetCDF will hand back an ID for each. 
+  call check( nf90_def_dim(ncid, "nd", nd, nd_dimid) )
+  call check( nf90_def_dim(ncid, "np", np, np_dimid) )
+
+  ! The dimids array is used to pass the IDs of the dimensions of
+  ! the variables. Note that in fortran arrays are stored in
+  ! column-major format.
+  dimids =  (/ nd_dimid, np_dimid /)
+
+  ! Define the variable.
+  call check( nf90_def_var(ncid, "positions", NF90_DOUBLE, dimids, pos_varid))
+
+  ! Assign units attributes to coordinate var data. This attaches a
+  ! text attribute to each of the coordinate variables, containing the
+  ! units.
+  call check( nf90_put_att(ncid, pos_varid, "names", "lon lat depth") )
+  call check( nf90_put_att(ncid, pos_varid, "units", "deg_E deg_N meters") )
+
+  ! Define the variable. The type of the variable in this case is
+  ! NF90_INT (4-byte integer).
+  call check( nf90_def_var(ncid, "ids", NF90_INT, np_dimid, ids_varid) )
+
+  ! Add global attributes with NF90_GLOBAL
+  call check( nf90_put_att(ncid, NF90_GLOBAL, "velocity_names", "u v w") )
+  call check( nf90_put_att(ncid, NF90_GLOBAL, "field_names", "lon lat depth temp salt") )
+  call check( nf90_put_att(ncid, NF90_GLOBAL, "field_units", "deg_E deg_N meters Celsius PSU") )
+  call check( nf90_put_att(ncid, NF90_GLOBAL, "time_units", "seconds") )
+  call check( nf90_put_att(ncid, NF90_GLOBAL, "title", "LETKF analyzed positions for drifters, for input into MOM4p1") )
+
+  ! End define mode. This tells netCDF we are done defining metadata.
+  call check( nf90_enddef(ncid) )
+
+  ! Write the data to the file.
+  call check( nf90_put_var(ncid, pos_varid, positions) )
+  call check( nf90_put_var(ncid, ids_varid, ids) )
+
+  ! Close the file. This frees up any internal netCDF resources
+  ! associated with the file, and flushes any buffers.
+  call check( nf90_close(ncid) )
+
+  ! DEALLOCATE
+  DEALLOCATE(positions,ids)
+
+END SUBROUTINE write_drifters
+
+!-----------------------------------------------------------------------
+! Write ensemble data after collecting data from processes
+!-----------------------------------------------------------------------
+SUBROUTINE write_ens_drifters(file,v4d_sub)
+! INCLUDE 'netcdf.inc' !STEVE: for NaN correction (OCEAN)
+  use netcdf
+  CHARACTER(4),INTENT(IN) :: file
+  REAL(r_size),INTENT(IN) :: v4d_sub(nid1,num_times,nbv,nv4d)
+  REAL(r_sngl) :: v4d_all(num_drifters,num_times,nv4d)
+  INTEGER :: l,n,ll,im
+  CHARACTER(11) :: filename='file000'
+  INTEGER :: i,j,k,m !STEVE: for debugging
+  LOGICAL :: verbose = .true.
+  INTEGER :: convcnt = 0
+
+  ll = CEILING(REAL(nbv)/REAL(nprocs))
+  DO l=1,ll
+    DO n=0,nprocs-1
+      im = n+1 + (l-1)*nprocs
+      IF(im <= nbv) THEN
+        WRITE(6,*) "In letkf_drifters.f90::write_ens_drifters, calling gather_drifters_mpi..."
+        CALL gather_drifters_mpi(n,v4d_sub(:,:,im,:),v4d_all)
+        WRITE(6,*) "In letkf_drifters.f90::write_ens_drifters, finished calling gather_drifters_mpi."
+      END IF
+    END DO
+
+    im = myrank+1 + (l-1)*nprocs
+    IF(im <= nbv) THEN
+      WRITE(filename(1:7),'(A4,I3.3)') file,im
+      WRITE(6,'(A,I3.3,2A)') 'MYRANK ',myrank,' is writing file: ',filename
+
+      !STEVE: debug
+      WRITE(6,*) "letkf_drifters.f90::write_ens_drifters:: MAXVAL(ABS(v4d(:,:,:,iv4d_x))) = ", MAXVAL(ABS(v4d_all(:,:,iv4d_x)))
+      WRITE(6,*) "letkf_drifters.f90::write_ens_drifters:: MAXVAL(ABS(v4d(:,:,:,iv4d_y))) = ", MAXVAL(ABS(v4d_all(:,:,iv4d_y)))
+
+      CALL write_drifters(filename,v4d_all)
+    END IF
+  END DO
+
+  RETURN
+END SUBROUTINE write_ens_drifters
+
+SUBROUTINE gather_drifters_mpi(nrank,v4d,v4d_all)
+  INTEGER,INTENT(IN) :: nrank
+  REAL(r_size),INTENT(IN) :: v4d(nid1,num_times,nv4d)
+  REAL(r_sngl),INTENT(OUT) :: v4d_all(num_drifters,num_times,nv4d)
+  REAL(r_sngl) :: bufs(nid1max,num_times*nv4d)
+  REAL(r_sngl) :: bufr(nid1max,num_times*nv4d,nprocs)
+  INTEGER :: j,k,n,ierr,ns,nr
+
+  ns = nid1max * (num_times*nv4d)
+  nr = ns
+  j=0
+  DO n=1,nv4d
+    DO k=1,num_times
+      j = j+1
+      bufs(1:nid1,j) = REAL(v4d(:,k,n),r_sngl)
+    END DO
+  END DO
+
+  CALL MPI_BARRIER(MPI_COMM_WORLD,ierr)
+  CALL MPI_GATHER(bufs,ns,MPI_REAL,&
+                & bufr,nr,MPI_REAL,nrank,MPI_COMM_WORLD,ierr)
+
+  IF(myrank == nrank) THEN
+    j=0
+    DO n=1,nv4d
+      DO k=1,num_times
+        j = j+1
+        CALL buf_to_drft(bufr(:,j,:),v4d_all(:,k,n))
+      END DO
+    END DO
+  END IF
+
+  CALL MPI_BARRIER(MPI_COMM_WORLD,ierr)
+
+  RETURN
+END SUBROUTINE gather_drifters_mpi
+
+SUBROUTINE gather_drifters_mpi_sp(nrank,v4d,v4d_all)
+  INTEGER,INTENT(IN) :: nrank
+  REAL(r_size),INTENT(IN) :: v4d(nid1,num_times)
+  REAL(r_sngl),INTENT(OUT) :: v4d_all(num_drifters,num_times)
+  REAL(r_sngl) :: bufs(nid1max,num_times)
+  REAL(r_sngl) :: bufr(nid1max,num_times,nprocs)
+  INTEGER :: j,k,n,ierr,ns,nr
+
+  ns = nid1max * (num_times)
+  nr = ns
+  j=0
+
+  DO k=1,num_times
+    j = j+1
+    bufs(1:nid1,j) = REAL(v4d(:,k),r_sngl)
+  END DO
+
+
+  CALL MPI_BARRIER(MPI_COMM_WORLD,ierr)
+  CALL MPI_GATHER(bufs,ns,MPI_REAL,&
+                & bufr,nr,MPI_REAL,nrank,MPI_COMM_WORLD,ierr)
+
+  IF(myrank == nrank) THEN
+    j=0
+    DO k=1,num_times
+      j = j+1
+      CALL buf_to_drft(bufr(:,j,:),v4d_all(:,k))
+    END DO
+  END IF
+
+  CALL MPI_BARRIER(MPI_COMM_WORLD,ierr)
+
+  RETURN
+END SUBROUTINE gather_drifters_mpi_sp
+
+!-----------------------------------------------------------------------
+! buffer -> drifters list
+!-----------------------------------------------------------------------
+SUBROUTINE buf_to_drft(buf,drft)
+  REAL(r_sngl),INTENT(IN) :: buf(nid1max,nprocs)
+  REAL(r_sngl),INTENT(OUT) :: drft(num_drifters)
+  INTEGER :: i,j,m,ilon,ilat
+
+  DO m=1,nprocs
+    DO i=1,nid1node(m)
+      j = m-1 + nprocs * (i-1)
+      nid = MOD(j,num_drifters) + 1
+      drft(nid) = buf(i,m)
+    END DO
+  END DO
+
+  RETURN
+END SUBROUTINE buf_to_drft
+
+!-----------------------------------------------------------------------
+! STORING DATA (ensemble mean and spread)
+!-----------------------------------------------------------------------
+SUBROUTINE write_ensmspr_drifters(file,v4d_sub)
+  USE common
+  IMPLICIT NONE
+
+  CHARACTER(4),INTENT(IN) :: file
+  REAL(r_size),INTENT(IN) :: v4d_sub(nid1,num_times,nbv,nv4d)
+  REAL(r_size) :: v4dm(nid1,num_times,nv4d)
+  REAL(r_size) :: v4ds(nid1,num_times)
+  REAL(r_sngl) :: v4d_all(num_drifters,num_times,nv4d)
+  REAL(r_sngl) :: v4d_all_sp(num_drifters,num_times)
+  INTEGER :: i,k,m,n,j
+  REAL(r_size) :: dist
+  CHARACTER(11) :: filename='file000.grd'
+  CHARACTER(11) :: filename2='file000.txt'
+  
+  WRITE(6,*) "Hello from write_ensmspr_drifters..."
+  WRITE(6,*) "Calling ensmean_drifters....."
+  CALL ensmean_drifters(nbv,nid1,v4d_sub,v4dm)
+  WRITE(6,*) "Finished calling ensmean_drifters and start calling gather_drifters_mpi..."
+
+  CALL gather_drifters_mpi(0,v4dm,v4d_all)
+  WRITE(6,*) "Finished calling gather_drifters_mpi..."
+  IF(myrank == 0) THEN
+    WRITE(filename(1:7),'(A4,A3)') file,'_me'
+    WRITE(6,'(A,I3.3,2A)') 'MYRANK ',myrank,' is writing a file ',filename
+    CALL write_bindrf4(filename,v4d_all)
+
+    WRITE(filename2(1:7),'(A4,A3)') file,'_me'
+    WRITE(6,'(A,I3.3,2A)') 'MYRANK ',myrank,' is writing a file ',filename2
+    CALL write_txtdrf4(filename2,v4d_all)
+  END IF
+
+  !DO n=1,nv4d
+  !  DO k=1,num_times
+  !    DO i=1,nid1
+  !      v4ds(i,k,n) = (v4d_sub(i,k,1,n)-v4dm(i,k,n))**2
+  !      DO m=2,nbv
+  !        v4ds(i,k,n) = v4ds(i,k,n) + (v4d_sub(i,k,m,n)-v4dm(i,k,n))**2
+  !      END DO
+  !      v4ds(i,k,n) = SQRT(v4ds(i,k,n) / REAL(nbv-1,r_size))
+  !    END DO
+  !  END DO
+  !END DO
+
+  DO k=1,num_times
+    DO i=1,nid1
+      CALL com_distll_1(REAL(v4d_sub(i,k,1,1),r_size),REAL(v4d_sub(i,k,1,2),r_size),REAL(v4dm(i,k,1),r_size),REAL(v4dm(i,k,2),r_size),dist)
+      v4ds(i,k) = dist**2
+      DO m=2,nbv
+        CALL com_distll_1(REAL(v4d_sub(i,k,m,1),r_size),REAL(v4d_sub(i,k,m,2),r_size),REAL(v4dm(i,k,1),r_size),REAL(v4dm(i,k,2),r_size),dist)
+        v4ds(i,k) = v4ds(i,k) + (dist)**2
+      END DO
+      v4ds(i,k) = SQRT(v4ds(i,k) / REAL(nbv-1,r_size))
+    END DO
+  END DO
+
+  CALL gather_drifters_mpi_sp(0,v4ds,v4d_all_sp)
+  IF(myrank == 0) THEN
+    WRITE(filename(1:7),'(A4,A3)') file,'_sp'
+    WRITE(6,'(A,I3.3,2A)') 'MYRANK ',myrank,' is writing a file ',filename
+    CALL write_bindrf4_sp(filename,v4d_all_sp)
+
+    WRITE(filename2(1:7),'(A4,A3)') file,'_sp'
+    WRITE(6,'(A,I3.3,2A)') 'MYRANK ',myrank,' is writing a file ',filename2
+    CALL write_txtdrf4_sp(filename2,v4d_all_sp)
+  END IF
+
+  RETURN
+END SUBROUTINE write_ensmspr_drifters
+
+SUBROUTINE write_txtdrf4(filename,v4d)
+!===============================================================================
+! Write out an letkf grd-format txt file
+!===============================================================================
+  IMPLICIT NONE
+  CHARACTER(*),INTENT(IN) :: filename
+  REAL(r_sngl),INTENT(IN) :: v4d(num_drifters,num_times,nv4d)
+  INTEGER :: iunit,iolen
+  INTEGER :: i,j,k,n,irec
+  LOGICAL :: dodebug=.false.
+  
+  iunit = 56 
+  OPEN(iunit,FILE=filename)
+
+  DO i=1,num_drifters
+    WRITE(iunit,'(I16,3F16.6)') i, v4d(i,num_times,:)
+  END DO
+
+  CLOSE(iunit)
+
+  RETURN
+END SUBROUTINE write_txtdrf4
+
+SUBROUTINE write_txtdrf4_sp(filename,v4d)
+!===============================================================================
+! Write out an letkf grd-format txt file
+!===============================================================================
+  IMPLICIT NONE
+  CHARACTER(*),INTENT(IN) :: filename
+  REAL(r_sngl),INTENT(IN) :: v4d(num_drifters,num_times)
+  INTEGER :: iunit,iolen
+  INTEGER :: i,j,k,n,irec
+  LOGICAL :: dodebug=.false.
+  
+  iunit = 56 
+  OPEN(iunit,FILE=filename)
+
+  DO i=1,num_drifters
+    WRITE(iunit,'(I16,3F16.6)') i, v4d(i,num_times)
+  END DO
+
+  CLOSE(iunit)
+
+  RETURN
+END SUBROUTINE write_txtdrf4_sp
+
+SUBROUTINE write_bindrf4(filename,v4d)
+!===============================================================================
+! Write out an letkf grd-format binary file in single precision
+!===============================================================================
+  IMPLICIT NONE
+  CHARACTER(*),INTENT(IN) :: filename
+  REAL(r_sngl),INTENT(IN) :: v4d(num_drifters,num_times,nv4d)
+  INTEGER :: iunit,iolen
+  INTEGER :: i,j,k,n,irec
+  LOGICAL :: dodebug=.false.
+
+  if (dodebug) print *, "write_bindrf4:: open filename = ",filename
+  iunit=56
+  INQUIRE(IOLENGTH=iolen) iolen
+  if (dodebug) print *, "write_bindrf4:: nij,iolength = ", num_drifters,iolen
+  !OPEN(iunit,FILE=filename,FORM='unformatted',ACCESS='direct',RECL=num_drifters*iolen)
+
+  !irec=1
+  !DO n=1,nv4d
+  !  DO j=1,num_times
+  !    if (dodebug) print *, "write_bindrf4:: n,irec = ",n,irec
+      !WRITE(iunit,REC=irec) (v4d(i,j,n),i=1,num_drifters)
+      
+  !    irec = irec + 1
+  !  END DO
+  !END DO
+  OPEN(iunit,FILE=filename)
+
+  DO i=1,num_drifters
+    WRITE(iunit, *) i, v4d(i,num_times,:)
+    !print *, v4d(i,num_times,:)
+  END DO
+
+  CLOSE(iunit)
+
+  RETURN
+END SUBROUTINE write_bindrf4
+
+SUBROUTINE write_bindrf4_sp(filename,v4d)
+!===============================================================================
+! Write out an letkf grd-format binary file in single precision
+!===============================================================================
+  IMPLICIT NONE
+  CHARACTER(*),INTENT(IN) :: filename
+  REAL(r_sngl),INTENT(IN) :: v4d(num_drifters,num_times)
+  INTEGER :: iunit,iolen
+  INTEGER :: i,j,k,n,irec
+  LOGICAL :: dodebug=.false.
+
+  if (dodebug) print *, "write_bindrf4:: open filename = ",filename
+  iunit=56
+  INQUIRE(IOLENGTH=iolen) iolen
+  if (dodebug) print *, "write_bindrf4:: nij,iolength = ", num_drifters,iolen
+  !OPEN(iunit,FILE=filename,FORM='unformatted',ACCESS='direct',RECL=num_drifters*iolen)
+
+  !irec=1
+  !DO n=1,nv4d
+  !  DO j=1,num_times
+  !    if (dodebug) print *, "write_bindrf4:: n,irec = ",n,irec
+      !WRITE(iunit,REC=irec) (v4d(i,j,n),i=1,num_drifters)
+      
+  !    irec = irec + 1
+  !  END DO
+  !END DO
+  OPEN(iunit,FILE=filename)
+
+  DO i=1,num_drifters
+    WRITE(iunit, *) i, v4d(i,num_times)
+    !print *, v4d(i,num_times,:)
+  END DO
+
+  CLOSE(iunit)
+
+  RETURN
+END SUBROUTINE write_bindrf4_sp
+
+!-----------------------------------------------------------------------
+! Ensemble manipulations
+!-----------------------------------------------------------------------
+SUBROUTINE ensmean_drifters(mem,nid,v4d,v4dm)
+  IMPLICIT NONE
+  INTEGER,INTENT(IN) :: mem ! number of ensemble members
+  INTEGER,INTENT(IN) :: nid
+  REAL(r_size),INTENT(IN) :: v4d(nid,num_times,mem,nv4d)
+  REAL(r_size),INTENT(OUT) :: v4dm(nid,num_times,nv4d)
+  INTEGER :: i,k,m,n
+
+  DO n=1,nv4d
+    DO k=1,num_times
+      DO i=1,nid
+        v4dm(i,k,n) = v4d(i,k,1,n)
+        DO m=2,mem
+          v4dm(i,k,n) = v4dm(i,k,n) + v4d(i,k,m,n)
+        END DO
+        v4dm(i,k,n) = v4dm(i,k,n) / REAL(nbv,r_size)
+      END DO
+    END DO
+  END DO
+
+  RETURN
+END SUBROUTINE ensmean_drifters
+
+SUBROUTINE check(status)
+!===============================================================================
+! Check the error status of the netcdf command
+!===============================================================================
+  USE netcdf
+  IMPLICIT NONE
+  integer, intent (in) :: status
+  if(status /= nf90_noerr) then 
+    print *, trim(nf90_strerror(status))
+    stop "Stopped"
+  end if
+END SUBROUTINE check
+
+
+END MODULE letkf_drifters_tools
